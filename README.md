@@ -39,7 +39,10 @@ The plugin provides three main functionalities:
 ---
 ## Current release
 
-v1.0 BETA1
+v1.0 BETA2
+
+- New: option to export .rc in one file using Gimp project's name.
+- Fixed: regression on 16 pixel export.
 
 ---
 ## Installation
@@ -105,7 +108,6 @@ By default, the plugin exports icons at the following sizes:
 BMP and PNG variants are generated for each size.
 
 ## Future plan
-- option to export .rc in one file
 - option to export in jpg format
 - export only the current icon
 - and more.
