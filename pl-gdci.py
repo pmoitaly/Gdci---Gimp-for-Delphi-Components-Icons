@@ -24,9 +24,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ----------------------------------------------------------------------------------------
 Export Component Icons (GIMP 3.0.6) - No PDB approach - Optimized + RC generation
-- Duplicate only twice per component (one master for BMP, one for PNG).
 - For each master: merge/flatten once, then scale->save->restore for each size.
-- New menu entry: generate .rc files (one .rc per component) referencing PNG names like TMyComponent16.png
+- Generate .rc files (one .rc per component) referencing PNG names like TMyComponent16.png
+- New export procedures to avoid blurry images in some situations 
 """
 import os
 import sys
@@ -404,9 +404,10 @@ def export_component_variants_no_pdb(procedure, runMode, image, nDrawables, args
         except Exception:
             pass
 
-        # ------- BMP master (duplicate once, merge/flatten once) -------
-        bmp_master = None
+                # ------- BMP master (per-size fresh duplicates, merge+flatten then scale/save) -------
         try:
+            # make the Fucsia visible and Transparent hidden on the ORIGINAL image,
+            # then duplicate that state into a base image to clone per-size from
             if layerFucsia is not None:
                 try:
                     layerFucsia.set_visible(True)
@@ -418,61 +419,102 @@ def export_component_variants_no_pdb(procedure, runMode, image, nDrawables, args
                 except Exception:
                     pass
 
-            bmp_master = duplicate_image(image)
-            mergedBmp = merge_visible_to_single_layer(bmp_master)
-            # prefer flatten for BMP (to remove alpha)
-            bmp_drawable = None
+            base_dup = None
             try:
-                bmp_drawable = flatten_image_if_possible(bmp_master)
-            except Exception:
-                bmp_drawable = mergedBmp
+                base_dup = duplicate_image(image)
+            except Exception as e:
+                _safe_msg(f"BMP: failed to duplicate base image: {e}")
+                base_dup = None
 
-            # record original size to restore after each scale
-            orig_w, orig_h = get_image_size_safe(bmp_master)
-
-            # for each size: scale -> save -> restore
-            for s in EXPORT_SIZES:
-                outPath = os.path.join(outputFolder, f"{compSafe}{s}.bmp")
+            if base_dup is None:
+                # fallback to previous behavior if duplication fails
+                bmp_master = duplicate_image(image)
                 try:
-                    try:
-                        scale_image(bmp_master, s, s)
-                    except Exception as se:
-                        _safe_msg(f"BMP scale failed for {s}: {se}")
-                    ok = gimp_file_save(bmp_master, outPath)
-                    if not ok:
-                        _safe_msg(f"BMP export failed (report) for {outPath}")
-                except Exception as e:
-                    _safe_msg(f"Error exporting BMP {outPath}: {e}\n{traceback.format_exc()}")
-                finally:
-                    # restore size for next iteration
-                    try:
-                        scale_image(bmp_master, orig_w, orig_h)
-                    except Exception:
-                        # if restore fails, try to delete and recreate master to be safe
+                    for s in EXPORT_SIZES:
+                        outPath = os.path.join(outputFolder, f"{compSafe}{s}.bmp")
                         try:
-                            delete_image_safe(bmp_master)
+                            scale_image(bmp_master, s, s)
+                            ok = gimp_file_save(bmp_master, outPath)
+                            if not ok:
+                                _safe_msg(f"BMP export failed (report) for {outPath}")
+                        except Exception as e:
+                            _safe_msg(f"Error exporting BMP {outPath}: {e}\n{traceback.format_exc()}")
+                        finally:
+                            try:
+                                scale_image(bmp_master, orig_w, orig_h)
+                            except Exception:
+                                pass
+                finally:
+                    try:
+                        delete_image_safe(bmp_master)
+                    except Exception:
+                        pass
+            else:
+                # For each target size make a fresh per-size copy from base_dup,
+                # merge visible layers, flatten, set interpolation, scale and save.
+                for s in EXPORT_SIZES:
+                    outPath = os.path.join(outputFolder, f"{compSafe}{s}.bmp")
+                    per = None
+                    try:
+                        per = duplicate_image(base_dup)
+                        # merge visible into single layer (robust)
+                        try:
+                            _ = merge_visible_to_single_layer(per)
                         except Exception:
                             pass
-                        bmp_master = duplicate_image(image)
-                        mergedBmp = merge_visible_to_single_layer(bmp_master)
+                        # flatten to remove alpha for BMP (if available)
                         try:
-                            bmp_drawable = flatten_image_if_possible(bmp_master)
+                            per_flat = flatten_image_if_possible(per)
+                            # per_flat might be a layer; but flatten modifies image in-place when available
                         except Exception:
-                            bmp_drawable = mergedBmp
-                        orig_w, orig_h = get_image_size_safe(bmp_master)
+                            pass
+
+                        # Save/restore interpolation around scale
+                        old_interp = None
+                        try:
+                            try:
+                                old_interp = Gimp.context_get_interpolation()
+                            except Exception:
+                                old_interp = None
+                            try:
+                                Gimp.context_set_interpolation(getattr(Gimp.InterpolationType, 'NEAREST', 0))
+                            except Exception:
+                                # if NEAREST not available try numeric 0
+                                try:
+                                    Gimp.context_set_interpolation(0)
+                                except Exception:
+                                    pass
+
+                            # now scale the per-size image
+                            try:
+                                scale_image(per, s, s)
+                            except Exception as se:
+                                _safe_msg(f"BMP scale failed for {s}: {se}")
+
+                        finally:
+                            if old_interp is not None:
+                                try:
+                                    Gimp.context_set_interpolation(old_interp)
+                                except Exception:
+                                    pass
+
+                        ok = gimp_file_save(per, outPath)
+                        if not ok:
+                            _safe_msg(f"BMP export failed (report) for {outPath}")
+                    except Exception as e:
+                        _safe_msg(f"Error exporting BMP {outPath}: {e}\n{traceback.format_exc()}")
+                    finally:
+                        if per is not None:
+                            try:
+                                delete_image_safe(per)
+                            except Exception:
+                                pass
         except Exception as e:
             _safe_msg(f"Error preparing BMP master for {compLayer.get_name()}: {e}\n{traceback.format_exc()}")
-        finally:
-            if bmp_master is not None:
-                try:
-                    delete_image_safe(bmp_master)
-                except Exception:
-                    pass
 
-        # ------- PNG master (duplicate once, merge once) -------
-        png_master = None
+        # ------- PNG master (per-size fresh duplicates, merge then scale/save, preserve alpha) -------
         try:
-            # hide fucsia, show transparent
+            # set layer visibility state on original image, then duplicate as base
             try:
                 if layerFucsia is not None:
                     layerFucsia.set_visible(False)
@@ -484,51 +526,98 @@ def export_component_variants_no_pdb(procedure, runMode, image, nDrawables, args
             except Exception:
                 pass
 
-            png_master = duplicate_image(image)
-            mergedPng = merge_visible_to_single_layer(png_master)
-            png_drawable = mergedPng
+            base_dup = None
+            try:
+                base_dup = duplicate_image(image)
+            except Exception as e:
+                _safe_msg(f"PNG: failed to duplicate base image: {e}")
+                base_dup = None
 
-            orig_w, orig_h = get_image_size_safe(png_master)
-
-            for s in EXPORT_SIZES:
-                outPath = os.path.join(outputFolder, f"{compSafe}{s}.png")
+            if base_dup is None:
+                # fallback behavior
+                png_master = duplicate_image(image)
                 try:
-                    try:
-                        scale_image(png_master, s, s)
-                    except Exception as se:
-                        _safe_msg(f"PNG scale failed for {s}: {se}")
-                    ok = gimp_file_save(png_master, outPath)
-                    if not ok:
-                        _safe_msg(f"PNG export failed (report) for {outPath}")
-                except Exception as e:
-                    _safe_msg(f"Error exporting PNG {outPath}: {e}\n{traceback.format_exc()}")
+                    mergedPng = merge_visible_to_single_layer(png_master)
+                    for s in EXPORT_SIZES:
+                        outPath = os.path.join(outputFolder, f"{compSafe}{s}.png")
+                        try:
+                            scale_image(png_master, s, s)
+                            ok = gimp_file_save(png_master, outPath)
+                            if not ok:
+                                _safe_msg(f"PNG export failed (report) for {outPath}")
+                        except Exception as e:
+                            _safe_msg(f"Error exporting PNG {outPath}: {e}\n{traceback.format_exc()}")
+                        finally:
+                            try:
+                                scale_image(png_master, orig_w, orig_h)
+                            except Exception:
+                                pass
                 finally:
                     try:
-                        scale_image(png_master, orig_w, orig_h)
+                        delete_image_safe(png_master)
                     except Exception:
+                        pass
+            else:
+                for s in EXPORT_SIZES:
+                    outPath = os.path.join(outputFolder, f"{compSafe}{s}.png")
+                    per = None
+                    try:
+                        per = duplicate_image(base_dup)
+                        # merge visible layers (single-pass)
                         try:
-                            delete_image_safe(png_master)
+                            _ = merge_visible_to_single_layer(per)
                         except Exception:
                             pass
-                        png_master = duplicate_image(image)
-                        mergedPng = merge_visible_to_single_layer(png_master)
-                        png_drawable = mergedPng
-                        orig_w, orig_h = get_image_size_safe(png_master)
+
+                        # scale with controlled interpolation
+                        old_interp = None
+                        try:
+                            try:
+                                old_interp = Gimp.context_get_interpolation()
+                            except Exception:
+                                old_interp = None
+                            try:
+                                # for PNG we may prefer a higher-quality filter (CUBIC/LANCZOS)
+                                interp = getattr(Gimp.InterpolationType, 'CUBIC', None)
+                                if interp is None:
+                                    interp = getattr(Gimp.InterpolationType, 'LANCZOS', None)
+                                if interp is None:
+                                    interp = 1  # fallback numeric
+                                Gimp.context_set_interpolation(interp)
+                            except Exception:
+                                pass
+
+                            try:
+                                scale_image(per, s, s)
+                            except Exception as se:
+                                _safe_msg(f"PNG scale failed for {s}: {se}")
+                        finally:
+                            if old_interp is not None:
+                                try:
+                                    Gimp.context_set_interpolation(old_interp)
+                                except Exception:
+                                    pass
+
+                        ok = gimp_file_save(per, outPath)
+                        if not ok:
+                            _safe_msg(f"PNG export failed (report) for {outPath}")
+                    except Exception as e:
+                        _safe_msg(f"Error exporting PNG {outPath}: {e}\n{traceback.format_exc()}")
+                    finally:
+                        if per is not None:
+                            try:
+                                delete_image_safe(per)
+                            except Exception:
+                                pass
         except Exception as e:
             _safe_msg(f"Error preparing PNG master for {compLayer.get_name()}: {e}\n{traceback.format_exc()}")
-        finally:
-            if png_master is not None:
-                try:
-                    delete_image_safe(png_master)
-                except Exception:
-                    pass
 
     _safe_msg(f"Export completed. Files saved into: {outputFolder}")
     return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
 
 
 # -------------------------
-# NEW: generate .rc files per component
+# generate .rc files per component
 # -------------------------
 def generate_rc_files(procedure, runMode, image, nDrawables, args, data):
     outFolder = None
